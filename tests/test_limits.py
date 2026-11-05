@@ -132,12 +132,19 @@ class LimitsTests(unittest.TestCase):
 class NoEmDashTests(unittest.TestCase):
     """Project rule: no em dashes in comments, UI text or messages."""
 
-    def test_source_has_no_em_or_en_dashes(self):
-        from appload import APP_PATH
-        with open(APP_PATH, encoding="utf-8") as f:
-            text = f.read()
-        self.assertNotIn("—", text)
-        self.assertNotIn("–", text)
+    def test_project_files_have_no_em_or_en_dashes(self):
+        import glob
+        import os
+        from appload import ROOT
+        dashes = (chr(0x2014), chr(0x2013))  # em dash, en dash
+        files = [os.path.join(ROOT, "idle_shutdown_app.pyw"), os.path.join(ROOT, "README.md"),
+                 os.path.join(ROOT, "build_exe.bat")] + glob.glob(os.path.join(ROOT, "tests", "*.py"))
+        for path in files:
+            with self.subTest(file=os.path.basename(path)):
+                with open(path, encoding="utf-8") as f:
+                    text = f.read()
+                for dash in dashes:
+                    self.assertNotIn(dash, text)
 
 
 if __name__ == "__main__":
