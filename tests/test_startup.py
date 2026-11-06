@@ -106,12 +106,39 @@ class SingleInstanceTests(unittest.TestCase):
         self.addCleanup(k32.CloseHandle, ctypes.c_void_p(handle))
         with mock.patch.object(self.m, "App") as app_cls, \
                 mock.patch.object(self.m.tk, "Tk"), \
+                mock.patch.object(self.m.user32, "FindWindowW", return_value=None), \
                 mock.patch.object(self.m.messagebox, "showinfo") as showinfo, \
                 mock.patch.object(self.m, "is_startup_enabled", return_value=False):
             self.m.main()
         showinfo.assert_called_once()
         self.assertIn("already running", showinfo.call_args[0][1])
         app_cls.assert_not_called()
+
+    def _run_second_copy(self, argv):
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateMutexW.restype = ctypes.c_void_p
+        k32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+        handle = k32.CreateMutexW(None, False, "Local\\IdleShutdownApp")
+        self.addCleanup(k32.CloseHandle, ctypes.c_void_p(handle))
+        with mock.patch.object(self.m, "App") as app_cls, \
+                mock.patch.object(self.m.tk, "Tk"), \
+                mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(self.m.user32, "FindWindowW", return_value=0x1234) as find, \
+                mock.patch.object(self.m.user32, "PostMessageW") as post, \
+                mock.patch.object(self.m.messagebox, "showinfo") as showinfo:
+            self.m.main()
+        app_cls.assert_not_called()
+        showinfo.assert_not_called()
+        find.assert_called_once_with(None, self.m.TRAY_WINDOW_TITLE)
+        return post
+
+    def test_second_copy_opens_the_hidden_window_of_the_first(self):
+        post = self._run_second_copy(["idle_shutdown_app.pyw"])
+        post.assert_called_once_with(0x1234, self.m.TRAY_CALLBACK, 0, self.m.WM_LBUTTONUP)
+
+    def test_second_copy_at_login_stays_quiet(self):
+        post = self._run_second_copy(["idle_shutdown_app.pyw", "--minimized"])
+        post.assert_not_called()
 
 
 if __name__ == "__main__":

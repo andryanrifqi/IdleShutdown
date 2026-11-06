@@ -76,13 +76,16 @@ def write_raw_settings(m, text):
         f.write(text)
 
 
-def make_app(m, **overrides):
-    """Create a hidden Tk root and an App with test settings. Returns (root, app)."""
+def make_app(m, use_tray=False, start_minimized=False, **overrides):
+    """
+    Create a hidden Tk root and an App with test settings. Returns (root, app).
+    No tray icon unless use_tray=True, so most tests leave the tray alone.
+    """
     import tkinter as tk
     write_settings(m, **overrides)
     root = tk.Tk()
     root.withdraw()
-    app = m.App(root)
+    app = m.App(root, start_minimized=start_minimized, use_tray=use_tray)
     if not app.s["test_mode"]:
         app.quit()
         raise RuntimeError("Refusing to run a test with Test mode off.")

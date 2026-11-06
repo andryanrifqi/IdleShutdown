@@ -15,24 +15,33 @@ Timer rules:
     Minutes: 5 to 1440
     No hours unit.
 
+Window and tray:
+    Minimizing hides the window to an icon in the notification area (tray).
+    Click the icon to open the window, right-click it for a menu.
+    The warning countdown appears in the bottom-right corner of the screen.
+
 Run:
     Double-click this .pyw file, or:  pythonw idle_shutdown_app.pyw
-    --minimized   start minimized (used by "Start with Windows")
+    --minimized   start hidden in the tray (used by "Start with Windows")
 
 Settings and log are stored in %APPDATA%\\IdleShutdown\\
 Requires Python 3.8+ on Windows. No third-party packages.
 """
 
+import base64
 import ctypes
 import ctypes.wintypes as wt
 import json
 import logging
 import math
 import os
+import queue
+import struct
 import subprocess
 import sys
 import threading
 import time
+import zlib
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -111,6 +120,89 @@ kernel32.QueryUnbiasedInterruptTime.argtypes = [ctypes.POINTER(ctypes.c_ulonglon
 kernel32.QueryUnbiasedInterruptTime.restype = wt.BOOL
 kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wt.BOOL, wt.LPCWSTR]
 kernel32.CreateMutexW.restype = wt.HANDLE
+
+# Window, menu, tray and icon functions (used by the tray icon and warning placement)
+shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+dwmapi = ctypes.WinDLL("dwmapi")
+
+WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
+
+
+class WNDCLASSEXW(ctypes.Structure):
+    _fields_ = [("cbSize", wt.UINT), ("style", wt.UINT), ("lpfnWndProc", WNDPROC),
+                ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
+                ("hInstance", wt.HINSTANCE), ("hIcon", wt.HICON), ("hCursor", wt.HANDLE),
+                ("hbrBackground", wt.HBRUSH), ("lpszMenuName", wt.LPCWSTR),
+                ("lpszClassName", wt.LPCWSTR), ("hIconSm", wt.HICON)]
+
+
+class GUID(ctypes.Structure):
+    _fields_ = [("Data1", wt.DWORD), ("Data2", wt.WORD), ("Data3", wt.WORD),
+                ("Data4", ctypes.c_ubyte * 8)]
+
+
+class NOTIFYICONDATAW(ctypes.Structure):
+    _fields_ = [("cbSize", wt.DWORD), ("hWnd", wt.HWND), ("uID", wt.UINT), ("uFlags", wt.UINT),
+                ("uCallbackMessage", wt.UINT), ("hIcon", wt.HICON), ("szTip", wt.WCHAR * 128),
+                ("dwState", wt.DWORD), ("dwStateMask", wt.DWORD), ("szInfo", wt.WCHAR * 256),
+                ("uVersion", wt.UINT), ("szInfoTitle", wt.WCHAR * 64), ("dwInfoFlags", wt.DWORD),
+                ("guidItem", GUID), ("hBalloonIcon", wt.HICON)]
+
+
+WM_NULL = 0x0000
+WM_DESTROY = 0x0002
+WM_CLOSE = 0x0010
+WM_LBUTTONUP = 0x0202
+WM_LBUTTONDBLCLK = 0x0203
+WM_RBUTTONUP = 0x0205
+WM_APP = 0x8000
+NIM_ADD, NIM_MODIFY, NIM_DELETE = 0, 1, 2
+NIF_MESSAGE, NIF_ICON, NIF_TIP, NIF_INFO = 0x1, 0x2, 0x4, 0x10
+NIIF_INFO, NIIF_NOSOUND = 0x1, 0x10
+MF_STRING, MF_SEPARATOR = 0x0, 0x800
+TPM_RIGHTBUTTON, TPM_NONOTIFY, TPM_RETURNCMD = 0x2, 0x80, 0x100
+SM_CXSMICON = 49
+SPI_GETWORKAREA = 0x0030
+DWMWA_EXTENDED_FRAME_BOUNDS = 9
+
+user32.RegisterClassExW.argtypes = [ctypes.POINTER(WNDCLASSEXW)]
+user32.RegisterClassExW.restype = wt.ATOM
+user32.UnregisterClassW.argtypes = [wt.LPCWSTR, wt.HINSTANCE]
+user32.CreateWindowExW.argtypes = [wt.DWORD, wt.LPCWSTR, wt.LPCWSTR, wt.DWORD, ctypes.c_int,
+                                   ctypes.c_int, ctypes.c_int, ctypes.c_int, wt.HWND, wt.HMENU,
+                                   wt.HINSTANCE, wt.LPVOID]
+user32.CreateWindowExW.restype = wt.HWND
+user32.DefWindowProcW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+user32.DefWindowProcW.restype = LRESULT
+user32.DestroyWindow.argtypes = [wt.HWND]
+user32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+user32.PostMessageW.restype = wt.BOOL
+user32.PostQuitMessage.argtypes = [ctypes.c_int]
+user32.FindWindowW.argtypes = [wt.LPCWSTR, wt.LPCWSTR]
+user32.FindWindowW.restype = wt.HWND
+user32.RegisterWindowMessageW.argtypes = [wt.LPCWSTR]
+user32.RegisterWindowMessageW.restype = wt.UINT
+user32.CreatePopupMenu.restype = wt.HMENU
+user32.AppendMenuW.argtypes = [wt.HMENU, wt.UINT, ctypes.c_size_t, wt.LPCWSTR]
+user32.SetMenuDefaultItem.argtypes = [wt.HMENU, wt.UINT, wt.UINT]
+user32.TrackPopupMenu.argtypes = [wt.HMENU, wt.UINT, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                  wt.HWND, ctypes.c_void_p]
+user32.TrackPopupMenu.restype = ctypes.c_int
+user32.DestroyMenu.argtypes = [wt.HMENU]
+user32.SetForegroundWindow.argtypes = [wt.HWND]
+user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+user32.CreateIconFromResourceEx.argtypes = [ctypes.c_char_p, wt.DWORD, wt.BOOL, wt.DWORD,
+                                            ctypes.c_int, ctypes.c_int, wt.UINT]
+user32.CreateIconFromResourceEx.restype = wt.HICON
+user32.DestroyIcon.argtypes = [wt.HICON]
+user32.SystemParametersInfoW.argtypes = [wt.UINT, wt.UINT, ctypes.c_void_p, wt.UINT]
+user32.SystemParametersInfoW.restype = wt.BOOL
+user32.GetWindowRect.argtypes = [wt.HWND, ctypes.POINTER(wt.RECT)]
+user32.GetWindowRect.restype = wt.BOOL
+shell32.Shell_NotifyIconW.argtypes = [wt.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
+shell32.Shell_NotifyIconW.restype = wt.BOOL
+dwmapi.DwmGetWindowAttribute.argtypes = [wt.HWND, wt.DWORD, ctypes.c_void_p, wt.DWORD]
+dwmapi.DwmGetWindowAttribute.restype = ctypes.c_long
 
 
 def awake_time():
@@ -199,6 +291,282 @@ class MouseHook:
     def touch(self):
         """Treat now as activity (used after resume, after cancelling, and so on)."""
         self.last_activity = awake_time()
+
+
+# ---------------------------------------------------------------------------
+# Tray icon
+# ---------------------------------------------------------------------------
+
+TRAY_WINDOW_TITLE = "IdleShutdownTrayWindow"  # lets a second copy find this one
+TRAY_CALLBACK = WM_APP + 1
+TRAY_COLORS = {"on": (26, 127, 55), "off": (138, 138, 138), "warning": (217, 119, 6)}
+CMD_SHOW, CMD_TOGGLE, CMD_EXIT = 1, 2, 3
+
+
+def icon_pixels(size, rgb):
+    """
+    Draw a round icon with a white power symbol. Returns 32-bit BGRA pixels,
+    bottom row first, as Windows icons expect. Edges are smoothed with 4x4
+    supersampling.
+    """
+    r0, g0, b0 = rgb
+    half = size / 2
+    disc_r = size * 0.48
+    ring_out, ring_in = size * 0.31, size * 0.19
+    bar_half_w = size * 0.06
+    bar_top, bar_bottom = -size * 0.36, -size * 0.04
+    gap = math.radians(40)
+    sub = [(i + 0.5) / 4 for i in range(4)]
+    rows = []
+    for y in range(size):
+        row = bytearray()
+        for x in range(size):
+            disc = glyph = 0
+            for sy in sub:
+                for sx in sub:
+                    px, py = x + sx - half, y + sy - half
+                    d = math.hypot(px, py)
+                    if d > disc_r:
+                        continue
+                    disc += 1
+                    on_ring = ring_in <= d <= ring_out and abs(math.atan2(px, -py)) >= gap
+                    on_bar = abs(px) <= bar_half_w and bar_top <= py <= bar_bottom
+                    if on_ring or on_bar:
+                        glyph += 1
+            t = glyph / disc if disc else 0.0
+            r, g, b = (round(c + (255 - c) * t) for c in (r0, g0, b0))
+            row += bytes((b, g, r, round(disc / 16 * 255)))
+        rows.append(bytes(row))
+    return b"".join(reversed(rows))
+
+
+def icon_png(size, rgb):
+    """The same icon as a PNG file in memory, for Tk window icons."""
+    bgra = icon_pixels(size, rgb)
+    stride = size * 4
+    raw = bytearray()
+    for row in range(size - 1, -1, -1):  # PNG rows go top to bottom
+        line = bgra[row * stride:(row + 1) * stride]
+        raw.append(0)  # filter type: none
+        for i in range(0, stride, 4):
+            b, g, r, a = line[i:i + 4]
+            raw += bytes((r, g, b, a))
+
+    def chunk(tag, data):
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+    header = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)  # 8-bit RGBA
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header)
+            + chunk(b"IDAT", zlib.compress(bytes(raw))) + chunk(b"IEND", b""))
+
+
+def make_icon(size, rgb):
+    """Create an HICON from icon_pixels(). Returns None on failure."""
+    pixels = icon_pixels(size, rgb)
+    mask = bytes(((size + 31) // 32) * 4 * size)  # all zero: transparency comes from alpha
+    header = struct.pack("<IiiHHIIiiII", 40, size, size * 2, 1, 32, 0, 0, 0, 0, 0, 0)
+    data = header + pixels + mask
+    return user32.CreateIconFromResourceEx(data, len(data), True, 0x00030000, size, size, 0) or None
+
+
+class TrayIcon:
+    """
+    Notification area (tray) icon with its own hidden window and message loop
+    on a background thread. Clicks and menu choices are put on `events`
+    ("show", "toggle", "exit") for the Tk thread to pick up. Tk itself is
+    never called from this thread.
+    """
+
+    def __init__(self):
+        self.events = queue.Queue()
+        self.hwnd = None
+        self.ok = False            # hidden window created
+        self.icon_added = False    # icon currently in the tray
+        self.monitoring = False    # for the menu label
+        self._state = "off"
+        self._tip = APP_NAME
+        self._icons = {}
+        self._class = f"IdleShutdownTray{id(self)}"
+        self._proc = WNDPROC(self._wndproc)  # keep a reference
+        self._thread = None
+        self._ready = threading.Event()
+        self._taskbar_created = 0
+
+    # ----- thread ---------------------------------------------------------
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, name="tray", daemon=True)
+        self._thread.start()
+        self._ready.wait(5)
+        return self.ok
+
+    def _run(self):
+        hinst = kernel32.GetModuleHandleW(None)
+        wc = WNDCLASSEXW()
+        wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
+        wc.lpfnWndProc = self._proc
+        wc.hInstance = hinst
+        wc.lpszClassName = self._class
+        if not user32.RegisterClassExW(ctypes.byref(wc)):
+            logging.error("Tray: RegisterClassExW failed, error %s", ctypes.get_last_error())
+            self._ready.set()
+            return
+        self.hwnd = user32.CreateWindowExW(0, self._class, TRAY_WINDOW_TITLE, 0, 0, 0, 0, 0,
+                                           None, None, hinst, None)
+        if not self.hwnd:
+            logging.error("Tray: CreateWindowExW failed, error %s", ctypes.get_last_error())
+            user32.UnregisterClassW(self._class, hinst)
+            self._ready.set()
+            return
+        # Explorer sends this after it restarts; the icon must be added again then
+        self._taskbar_created = user32.RegisterWindowMessageW("TaskbarCreated")
+        size = user32.GetSystemMetrics(SM_CXSMICON) or 16
+        self._icons = {state: make_icon(size, rgb) for state, rgb in TRAY_COLORS.items()}
+        self.ok = True
+        self._add()
+        self._ready.set()
+
+        msg = wt.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
+
+        for h in self._icons.values():
+            if h:
+                user32.DestroyIcon(h)
+        user32.UnregisterClassW(self._class, hinst)
+        self.hwnd = None
+
+    def stop(self):
+        if self.hwnd and self._thread and self._thread.is_alive():
+            user32.PostMessageW(self.hwnd, WM_CLOSE, 0, 0)
+            self._thread.join(3)
+        self.ok = False
+
+    # ----- Shell_NotifyIcon -----------------------------------------------
+
+    def _data(self, flags):
+        d = NOTIFYICONDATAW()
+        d.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
+        d.hWnd = self.hwnd
+        d.uID = 1
+        d.uFlags = flags
+        return d
+
+    def _add(self):
+        # Remove a leftover icon first (for example when Explorer restarted), then add
+        shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(self._data(0)))
+        d = self._data(NIF_MESSAGE | NIF_ICON | NIF_TIP)
+        d.uCallbackMessage = TRAY_CALLBACK
+        d.hIcon = self._icons.get(self._state)
+        d.szTip = self._tip[:127]
+        self.icon_added = bool(shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(d)))
+        if not self.icon_added:
+            logging.warning("Tray: could not add the icon yet (taskbar not ready?).")
+        return self.icon_added
+
+    def set_state(self, state, tip, monitoring):
+        """Change the icon color and tooltip. Safe to call from the Tk thread."""
+        self.monitoring = monitoring
+        if (state, tip) == (self._state, self._tip):
+            return
+        self._state, self._tip = state, tip
+        if self.ok and self.icon_added:
+            d = self._data(NIF_ICON | NIF_TIP)
+            d.hIcon = self._icons.get(state)
+            d.szTip = tip[:127]
+            shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(d))
+
+    def notify(self, title, text):
+        """Show a Windows notification from the tray icon."""
+        if self.ok and self.icon_added:
+            d = self._data(NIF_INFO)
+            d.szInfoTitle = title[:63]
+            d.szInfo = text[:255]
+            d.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND
+            shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(d))
+
+    # ----- window procedure (tray thread) ---------------------------------
+
+    def _wndproc(self, hwnd, msg, w_param, l_param):
+        if msg == TRAY_CALLBACK:
+            if l_param in (WM_LBUTTONUP, WM_LBUTTONDBLCLK):
+                self.events.put("show")
+            elif l_param == WM_RBUTTONUP:
+                self._show_menu(hwnd)
+            return 0
+        if self._taskbar_created and msg == self._taskbar_created:
+            self._add()
+            return 0
+        if msg == WM_CLOSE:
+            user32.DestroyWindow(hwnd)
+            return 0
+        if msg == WM_DESTROY:
+            if self.icon_added:
+                shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(self._data(0)))
+                self.icon_added = False
+            user32.PostQuitMessage(0)
+            return 0
+        return user32.DefWindowProcW(hwnd, msg, w_param, l_param)
+
+    def _show_menu(self, hwnd):
+        menu = user32.CreatePopupMenu()
+        user32.AppendMenuW(menu, MF_STRING, CMD_SHOW, "Open Idle Shutdown")
+        user32.AppendMenuW(menu, MF_STRING, CMD_TOGGLE,
+                           "Turn off monitoring" if self.monitoring else "Turn on monitoring")
+        user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
+        user32.AppendMenuW(menu, MF_STRING, CMD_EXIT, "Exit")
+        user32.SetMenuDefaultItem(menu, CMD_SHOW, 0)
+        pt = wt.POINT()
+        user32.GetCursorPos(ctypes.byref(pt))
+        user32.SetForegroundWindow(hwnd)  # so the menu closes when clicking elsewhere
+        cmd = user32.TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_RETURNCMD,
+                                    pt.x, pt.y, 0, hwnd, None)
+        user32.PostMessageW(hwnd, WM_NULL, 0, 0)
+        user32.DestroyMenu(menu)
+        event = {CMD_SHOW: "show", CMD_TOGGLE: "toggle", CMD_EXIT: "exit"}.get(cmd)
+        if event:
+            self.events.put(event)
+
+
+# ---------------------------------------------------------------------------
+# Window placement
+# ---------------------------------------------------------------------------
+
+def work_area():
+    """(left, top, right, bottom) of the primary screen without the taskbar, or None."""
+    r = wt.RECT()
+    if user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(r), 0):
+        return r.left, r.top, r.right, r.bottom
+    return None
+
+
+def window_rects(win):
+    """
+    (outer, visible) RECTs of a Tk toplevel. On Windows 10 and 11 the outer
+    rectangle includes invisible resize borders; the visible one does not.
+    """
+    hwnd = wt.HWND(int(win.wm_frame(), 16))
+    outer = wt.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(outer))
+    visible = wt.RECT()
+    if dwmapi.DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, ctypes.byref(visible),
+                                    ctypes.sizeof(visible)) != 0:
+        visible = outer
+    return outer, visible
+
+
+def place_bottom_right(win, margin=12):
+    """Move a mapped Tk toplevel to the bottom-right corner, just above the taskbar."""
+    win.update_idletasks()
+    left, top, right, bottom = work_area() or (0, 0, win.winfo_screenwidth(), win.winfo_screenheight())
+    m = round(margin * win.winfo_fpixels("1i") / 96)  # scale the margin with display DPI
+    outer, vis = window_rects(win)
+    x = right - m - (vis.right - vis.left) - (vis.left - outer.left)
+    y = bottom - m - (vis.bottom - vis.top) - (vis.top - outer.top)
+    win.geometry(f"+{x}+{y}")
+    win.update_idletasks()
 
 
 # ---------------------------------------------------------------------------
@@ -309,10 +677,13 @@ def fmt(seconds):
 # ---------------------------------------------------------------------------
 
 class App:
-    def __init__(self, root, start_minimized=False):
+    def __init__(self, root, start_minimized=False, use_tray=True):
         self.root = root
         self.s = load_settings()
         self.hook = MouseHook()
+        self.tray = None
+        self._tray_tip_shown = False
+        self._tick_job = self._status_job = self._tray_job = None
 
         self.check_job = None
         self.warning_win = None
@@ -327,12 +698,25 @@ class App:
 
         self.build_ui()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.set_window_icon()
+
+        if use_tray:
+            tray = TrayIcon()
+            if tray.start():
+                self.tray = tray
+                root.bind("<Unmap>", self._on_unmap)
+                self._tray_poll()
+            else:
+                logging.warning("Tray icon not available, minimizing to the taskbar instead.")
 
         if self.s["enabled"]:
             self.start_monitoring()
         self.refresh()
         if start_minimized:
-            root.iconify()
+            if self.tray:
+                root.withdraw()
+            else:
+                root.iconify()
         self.status_loop()
 
     # ----- settings helpers -------------------------------------------------
@@ -450,6 +834,7 @@ class App:
         self.update_status()
 
     def update_status(self):
+        self.update_tray()
         if not self.s["enabled"]:
             self.progress["value"] = 0
             self.status_label.config(text="Monitoring is off.")
@@ -621,6 +1006,7 @@ class App:
         self.warning_deadline = self.hook.last_activity + self.limit()
 
         w = tk.Toplevel(self.root)
+        w.attributes("-alpha", 0.0)  # stay invisible until it is in place
         w.title(APP_NAME)
         w.attributes("-topmost", True)
         w.resizable(False, False)
@@ -634,10 +1020,13 @@ class App:
         ttk.Button(w, text="Cancel", width=14,
                    command=lambda: self.close_warning("Cancelled from the warning window.")).pack(pady=(0, 20))
 
-        w.update_idletasks()
-        x = (w.winfo_screenwidth() - w.winfo_width()) // 2
-        y = (w.winfo_screenheight() - w.winfo_height()) // 2
-        w.geometry(f"+{x}+{y}")
+        self.warning_msg.config(text=self.countdown_text(self.warning_deadline - awake_time()))
+        # Bottom-right corner, just above the taskbar, like a notification
+        try:
+            place_bottom_right(w)
+        except (tk.TclError, ValueError, OSError) as e:
+            logging.warning("Could not place the warning: %s", e)
+        w.attributes("-alpha", 1.0)
 
         self.warning_win = w
         logging.info("Warning shown.")
@@ -655,8 +1044,11 @@ class App:
             self.close_warning(None)
             self.run_action()
             return
-        self.warning_msg.config(text=f"{self.action_label()} in {int(math.ceil(left))} seconds")
-        self.root.after(200, self.warning_tick)
+        self.warning_msg.config(text=self.countdown_text(left))
+        self._tick_job = self.root.after(200, self.warning_tick)
+
+    def countdown_text(self, left):
+        return f"{self.action_label()} in {int(math.ceil(left))} seconds"
 
     def close_warning(self, reason):
         if self.warning_win:
@@ -728,28 +1120,125 @@ class App:
                 self.set_event("Resumed from sleep or hibernate, timer restarted.")
             self.schedule_check()
 
-        if self.root.state() != "iconic":
+        if self.root.state() == "normal":
             self.update_status()
-        self.root.after(1000, self.status_loop)
+        else:
+            self.update_tray()
+        self._status_job = self.root.after(1000, self.status_loop)
+
+    # ----- tray ---------------------------------------------------------------
+
+    def set_window_icon(self):
+        """Use the power-symbol icon for this window and the warning (instead of Tk's feather)."""
+        try:
+            self._icon_images = [
+                tk.PhotoImage(master=self.root, data=base64.b64encode(icon_png(size, TRAY_COLORS["on"])))
+                for size in (48, 32, 16)]
+            self.root.iconphoto(True, *self._icon_images)
+        except tk.TclError as e:
+            logging.warning("Could not set the window icon: %s", e)
+
+    def tray_state(self):
+        """(icon state, tooltip) for the tray icon."""
+        if not self.s["enabled"]:
+            return "off", f"{APP_NAME}: off"
+        if self.warning_win:
+            return "warning", f"{APP_NAME}: {self.action_label().lower()} soon"
+        if self.paused_after_action:
+            return "on", f"{APP_NAME}: on, waiting for mouse activity"
+        return "on", (f"{APP_NAME}: on, {self.action_label().lower()} after "
+                      f"{self.s['value']} {self.s['unit']} idle")
+
+    def update_tray(self):
+        if self.tray:
+            state, tip = self.tray_state()
+            self.tray.set_state(state, tip, self.s["enabled"])
+
+    def _tray_poll(self):
+        """Pick up tray clicks and menu choices from the tray thread."""
+        if not self.tray:
+            return
+        while True:
+            try:
+                event = self.tray.events.get_nowait()
+            except queue.Empty:
+                break
+            self.handle_tray_event(event)
+            if not self.tray:  # "exit" was handled
+                return
+        self._tray_job = self.root.after(150, self._tray_poll)
+
+    def handle_tray_event(self, event):
+        if event == "show":
+            self.show_window()
+        elif event == "toggle":
+            self.toggle()
+        elif event == "exit":
+            self.quit()
+
+    def _on_unmap(self, event):
+        # Minimize button or Win+D: hide to the tray instead of the taskbar
+        if event.widget is self.root and self.tray:
+            self.root.after_idle(self._hide_if_minimized)
+
+    def _hide_if_minimized(self):
+        try:
+            if self.root.state() == "iconic":
+                self.hide_to_tray()
+        except tk.TclError:
+            pass
+
+    def hide_to_tray(self):
+        if not self.tray:
+            self.root.iconify()
+            return
+        self.root.withdraw()
+        if not self._tray_tip_shown:
+            self._tray_tip_shown = True
+            self.tray.notify(f"{APP_NAME} is still running",
+                             "Click the icon in the notification area to open it. "
+                             "Right-click it for more options.")
+
+    def show_window(self):
+        self.root.deiconify()
+        self.root.state("normal")
+        self.root.lift()
+        try:
+            self.root.focus_force()
+        except tk.TclError:
+            pass
+        self.update_status()
 
     # ----- closing ----------------------------------------------------------
 
     def on_close(self):
         if self.s["enabled"]:
+            where = "hide to the tray" if self.tray else "minimize"
             ans = messagebox.askyesnocancel(
                 APP_NAME,
                 "Monitoring is on.\n\n"
-                "Yes: minimize and keep monitoring\n"
+                f"Yes: {where} and keep monitoring\n"
                 "No: close the app and stop monitoring")
             if ans is None:
                 return
             if ans:
-                self.root.iconify()
+                self.hide_to_tray()
                 return
         self.quit()
 
     def quit(self):
+        # Cancel pending timers so none of them fire after the window is gone
+        for job in (self.check_job, self._tick_job, self._status_job, self._tray_job):
+            if job:
+                try:
+                    self.root.after_cancel(job)
+                except tk.TclError:
+                    pass
+        self.check_job = self._tick_job = self._status_job = self._tray_job = None
         self.hook.stop()
+        if self.tray:
+            self.tray.stop()
+            self.tray = None
         logging.info("App closed.")
         self.root.destroy()
 
@@ -774,7 +1263,13 @@ def main():
     mutex = kernel32.CreateMutexW(None, False, "Local\\IdleShutdownApp")
     if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
         root.withdraw()
-        messagebox.showinfo(APP_NAME, "Idle Shutdown is already running.")
+        # If the running copy is hidden in the tray, bring its window back
+        other = user32.FindWindowW(None, TRAY_WINDOW_TITLE)
+        if other and "--minimized" not in sys.argv:
+            user32.PostMessageW(other, TRAY_CALLBACK, 0, WM_LBUTTONUP)
+        elif not other:
+            messagebox.showinfo(APP_NAME, "Idle Shutdown is already running.")
+        root.destroy()
         return
     root._single_instance_mutex = mutex  # keep the handle alive
 

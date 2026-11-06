@@ -277,5 +277,56 @@ class SafetyNetTests(FlowTestBase):
         self.assertIsNone(self.app.warning_win)
 
 
+class WarningPositionTests(FlowTestBase):
+    def visible_rect(self):
+        self.root.update()
+        _, vis = self.m.window_rects(self.app.warning_win)
+        return vis
+
+    def expected_margin(self):
+        return round(12 * self.app.warning_win.winfo_fpixels("1i") / 96)
+
+    def test_warning_sits_in_bottom_right_above_taskbar(self):
+        self.open_warning()
+        vis = self.visible_rect()
+        left, top, right, bottom = self.m.work_area()
+        m = self.expected_margin()
+        self.assertAlmostEqual(vis.right, right - m, delta=2)
+        self.assertAlmostEqual(vis.bottom, bottom - m, delta=2)
+        self.assertGreaterEqual(vis.left, left)
+        self.assertGreaterEqual(vis.top, top)
+
+    def test_warning_is_visible_and_on_top(self):
+        self.open_warning()
+        w = self.app.warning_win
+        self.assertEqual(float(w.attributes("-alpha")), 1.0)
+        self.assertTrue(int(w.attributes("-topmost")))
+
+    def test_countdown_text_set_before_placing(self):
+        with mock.patch.object(self.m, "place_bottom_right") as place:
+            self.open_warning()
+        win = place.call_args[0][0]
+        self.assertIs(win, self.app.warning_win)
+        self.assertEqual(self.app.warning_msg.cget("text"), "Lock in 10 seconds")
+
+    def test_longest_action_text_stays_on_screen(self):
+        self.app.action_var.set("hibernate")
+        self.app.on_action_change()
+        self.app.warning_var.set("60")
+        self.app.commit_warning()
+        self.app.unit_var.set("minutes")
+        self.app.on_unit_change()
+        self.open_warning()
+        self.wait(1)
+        vis = self.visible_rect()
+        self.assertIn("Hibernate in", self.app.warning_msg.cget("text"))
+        self.assertLessEqual(vis.right, self.m.work_area()[2])
+
+    def test_placement_error_still_shows_warning(self):
+        with mock.patch.object(self.m, "place_bottom_right", side_effect=OSError("no screen")):
+            self.open_warning()
+        self.assertEqual(float(self.app.warning_win.attributes("-alpha")), 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

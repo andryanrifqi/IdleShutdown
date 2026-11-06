@@ -5,10 +5,26 @@ A small Windows desktop app that watches for mouse inactivity and then shuts dow
 ## How it works
 
 - A low-level Windows mouse hook (`WH_MOUSE_LL`) reports every mouse event: movement, clicks and wheel scrolls. The cursor is not polled.
-- When the mouse has been idle for the set time, a countdown warning appears. Any mouse activity or the Cancel button stops it.
+- When the mouse has been idle for the set time, a countdown warning appears in the bottom-right corner of the screen, just above the taskbar. Any mouse activity or the Cancel button stops it.
 - After an action runs, the app waits for real mouse activity before it starts counting again.
 - The timer restarts after the PC wakes from sleep or hibernate.
-- Only one copy can run at a time.
+- Only one copy can run at a time. Starting it again while it is hidden in the tray opens the existing window.
+
+## Tray icon
+
+Minimizing the window (or starting with `--minimized`, which "Start with Windows" uses) hides it to an icon in the notification area.
+
+| Icon color | Meaning |
+| --- | --- |
+| Green | Monitoring is on |
+| Amber | Warning countdown is on screen |
+| Gray | Monitoring is off |
+
+- Click the icon to open the window.
+- Right-click it for **Open Idle Shutdown**, **Turn on/off monitoring** and **Exit**.
+- Hover over it to see the current status.
+
+Windows 11 may put new icons in the hidden overflow area (the `^` arrow). Drag the icon onto the taskbar to keep it visible.
 
 ## Settings
 
@@ -36,7 +52,7 @@ pythonw idle_shutdown_app.pyw --minimized
 
 The tests use only Python's built-in `unittest`. They load the app with a temporary settings folder, so your real settings and log are never touched, and real actions are blocked.
 
-Run the default suite from the project folder (about 5 seconds):
+Run the default suite from the project folder (about 10 seconds). The tray tests add the app's icon to the notification area for a moment and remove it again:
 
 ```
 py -m unittest discover -s tests -v
@@ -47,7 +63,8 @@ py -m unittest discover -s tests -v
 | `test_settings.py` | Number parsing, limits, loading bad or missing settings files |
 | `test_limits.py` | Typing values and switching Seconds/Minutes in the UI, warning cap, no em dashes in the source |
 | `test_flow.py` | Warning timing, cancel by move/click/wheel, Test mode action, waiting for mouse after an action, resume from sleep (uses a fake clock) |
-| `test_startup.py` | Start with Windows command for the .pyw and the .exe, single-instance check |
+| `test_startup.py` | Start with Windows command for the .pyw and the .exe, single-instance check, opening the hidden window from a second copy |
+| `test_tray.py` | Icon drawing, tray clicks and menu, hide to tray, icon color and tooltip states |
 | `test_mouse_e2e.py` | Real mouse hook end to end (opt-in) |
 
 Two groups are skipped unless you turn them on, because they touch the real system:
