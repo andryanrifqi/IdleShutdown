@@ -12,7 +12,7 @@ A small Windows desktop app that watches for mouse inactivity and then shuts dow
 
 ## Tray icon
 
-Minimizing the window (or starting with `--minimized`, which "Start with Windows" uses) hides it to an icon in the notification area.
+Minimizing or closing the window (or starting with `--minimized`, which "Start with Windows" uses) hides it to an icon in the notification area. Closing does not ask and does not stop monitoring. To quit the app, right-click the tray icon and choose **Exit**.
 
 | Icon color | Meaning |
 | --- | --- |

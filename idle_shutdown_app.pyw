@@ -16,8 +16,9 @@ Timer rules:
     No hours unit.
 
 Window and tray:
-    Minimizing hides the window to an icon in the notification area (tray).
-    Click the icon to open the window, right-click it for a menu.
+    Minimizing or closing the window hides it to an icon in the notification
+    area (tray). Click the icon to open the window, right-click it for a menu
+    with Exit, which is how the app is closed.
     The warning countdown appears in the bottom-right corner of the screen.
 
 Run:
@@ -1197,7 +1198,7 @@ class App:
             self._tray_tip_shown = True
             self.tray.notify(f"{APP_NAME} is still running",
                              "Click the icon in the notification area to open it. "
-                             "Right-click it for more options.")
+                             "Right-click it and choose Exit to close the app.")
 
     def show_window(self):
         self.root.deiconify()
@@ -1212,17 +1213,22 @@ class App:
     # ----- closing ----------------------------------------------------------
 
     def on_close(self):
+        # The close button always hides to the tray, without asking.
+        # Exit is in the tray icon's right-click menu.
+        if self.tray:
+            self.hide_to_tray()
+            return
+        # No tray icon (rare): there would be no way back, so ask instead
         if self.s["enabled"]:
-            where = "hide to the tray" if self.tray else "minimize"
             ans = messagebox.askyesnocancel(
                 APP_NAME,
                 "Monitoring is on.\n\n"
-                f"Yes: {where} and keep monitoring\n"
+                "Yes: minimize and keep monitoring\n"
                 "No: close the app and stop monitoring")
             if ans is None:
                 return
             if ans:
-                self.hide_to_tray()
+                self.root.iconify()
                 return
         self.quit()
 

@@ -182,14 +182,34 @@ class AppTrayTests(unittest.TestCase):
         with self.assertRaises(tk.TclError):
             root.winfo_exists()
 
-    def test_close_with_monitoring_on_can_hide_to_tray(self):
-        root, app = self.make(enabled=True)
+    def test_close_button_hides_to_tray_without_asking(self):
+        for enabled in (True, False):
+            with self.subTest(monitoring=enabled):
+                root, app = self.make(enabled=enabled)
+                self.show(root, app)
+                with mock.patch.object(self.m.messagebox, "askyesnocancel") as ask:
+                    app.on_close()
+                ask.assert_not_called()
+                self.assertEqual(root.state(), "withdrawn")
+                self.assertEqual(app.s["enabled"], enabled, "closing must not change monitoring")
+                self.assertIsNotNone(app.tray, "app must keep running in the tray")
+
+    def test_close_button_is_wired_to_hide(self):
+        root, app = self.make()
         self.show(root, app)
+        handler = root.tk.call("wm", "protocol", root._w, "WM_DELETE_WINDOW")
+        root.tk.eval(handler)  # what Windows runs when you click X
+        pump(root, 0.3)
+        self.assertEqual(root.state(), "withdrawn")
+        self.assertIsNotNone(app.tray)
+
+    def test_without_tray_close_still_asks(self):
+        root, app = make_app(self.m, use_tray=False, enabled=True)
+        self.addCleanup(close_app, app)
         with mock.patch.object(self.m.messagebox, "askyesnocancel", return_value=True) as ask:
             app.on_close()
-        self.assertIn("hide to the tray", ask.call_args[0][1])
-        self.assertEqual(root.state(), "withdrawn")
-        self.assertTrue(app.s["enabled"])
+        ask.assert_called_once()
+        self.assertEqual(root.state(), "iconic")
 
     def test_tray_state_follows_app_state(self):
         root, app = self.make()
